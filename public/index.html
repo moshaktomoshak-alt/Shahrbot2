@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>جنگ جهانی</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b1220; overflow: hidden; height: 100%; }
+  #map { display: block; width: 100vw; height: 100vh; touch-action: none; }
+  #hud {
+    position: fixed; top: 8px; left: 8px; right: 8px;
+    display: flex; justify-content: space-between; gap: 8px;
+    font-family: system-ui, sans-serif; color: #fff; font-size: 13px;
+    pointer-events: none;
+  }
+  #status { background: rgba(0,0,0,0.55); padding: 6px 10px; border-radius: 8px; }
+  #playerList { background: rgba(0,0,0,0.55); padding: 6px 10px; border-radius: 8px; max-width: 55vw; text-align: right; }
+  #gameOver {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.75); color: #fff; font-family: system-ui, sans-serif; font-size: 22px;
+  }
+</style>
+</head>
+<body>
+  <canvas id="map"></canvas>
+  <div id="hud">
+    <div id="status">در حال اتصال...</div>
+    <div id="playerList"></div>
+  </div>
+  <div id="gameOver"></div>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    tg?.ready();
+    tg?.expand();
+
+    const params = new URLSearchParams(location.search);
+    const lobbyId = params.get("lobbyId");
+    const telegramId = tg?.initDataUnsafe?.user?.id ?? params.get("telegramId") ?? Math.floor(Math.random() * 1e9);
+    const name = tg?.initDataUnsafe?.user?.first_name ?? params.get("name") ?? "بازیکن";
+
+    const canvas = document.getElementById("map");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const playerListEl = document.getElementById("playerList");
+    const gameOverEl = document.getElementById("gameOver");
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    let myPlayerId = null;
+    let mapWidth = 0, mapHeight = 0;
+    let latestState = null;
+
+    const wsProto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${wsProto}://${location.host}/ws?lobbyId=${encodeURIComponent(lobbyId)}&telegramId=${telegramId}&name=${encodeURIComponent(name)}`);
+
+    ws.onopen = () => { statusEl.textContent = "متصل شد، منتظر بازیکنان دیگر..."; };
+    ws.onclose = () => { statusEl.textContent = "اتصال قطع شد."; };
+    ws.onerror = () => { statusEl.textContent = "خطا در اتصال."; };
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "joined") {
+        myPlayerId = msg.playerId;
+        mapWidth = msg.width;
+        mapHeight = msg.height;
+        statusEl.textContent = "در حال بازی";
+      } else if (msg.type === "state") {
+        latestState = msg;
+        render();
+        updatePlayerList(msg);
+        if (msg.gameOver) showGameOver(msg);
+      } else if (msg.type === "error") {
+        statusEl.textContent = "خطا: " + msg.reason;
+      }
+    };
+
+    function updatePlayerList(state) {
+      playerListEl.innerHTML = state.players
+        .map((p) => `<div style="color:${p.color}">${p.alive ? "●" : "✕"} ${p.name} — ${p.tileCount}</div>`)
+        .join("");
+    }
+
+    function showGameOver(state) {
+      const winner = state.players.find((p) => p.id === state.winnerId);
+      gameOverEl.textContent = winner ? `${winner.name} برنده شد! 🏆` : "بازی تمام شد";
+      gameOverEl.style.display = "flex";
+    }
+
+    function render() {
+      if (!latestState) return;
+      const { owner, players } = latestState;
+      const tileW = canvas.width / mapWidth;
+      const tileH = canvas.height / mapHeight;
+
+      ctx.fillStyle = "#0b1220";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      for (let y = 0; y < mapHeight; y++) {
+        for (let x = 0; x < mapWidth; x++) {
+          const idx = y * mapWidth + x;
+          const ownerIdx = owner[idx];
+          if (ownerIdx === -1) continue; // leave water/neutral as background
+          const player = players[ownerIdx];
+          ctx.fillStyle = player ? player.color : "#555";
+          ctx.fillRect(x * tileW, y * tileH, tileW + 0.5, tileH + 0.5);
+        }
+      }
+    }
+
+    // Tap-and-hold to attack toward that point (like holding a finger down
+    // in the original game). Releasing sends stopAttack.
+    let holding = false;
+
+    function screenToTile(clientX, clientY) {
+      const tileW = canvas.width / mapWidth;
+      const tileH = canvas.height / mapHeight;
+      const x = Math.floor(clientX / tileW);
+      const y = Math.floor(clientY / tileH);
+      return y * mapWidth + x;
+    }
+
+    canvas.addEventListener("pointerdown", (e) => {
+      if (!mapWidth) return;
+      holding = true;
+      const target = screenToTile(e.clientX, e.clientY);
+      ws.send(JSON.stringify({ type: "startAttack", targetTile: target }));
+    });
+
+    canvas.addEventListener("pointermove", (e) => {
+      if (!holding || !mapWidth) return;
+      const target = screenToTile(e.clientX, e.clientY);
+      ws.send(JSON.stringify({ type: "startAttack", targetTile: target }));
+    });
+
+    function release() {
+      if (!holding) return;
+      holding = false;
+      ws.send(JSON.stringify({ type: "stopAttack" }));
+    }
+    canvas.addEventListener("pointerup", release);
+    canvas.addEventListener("pointercancel", release);
+    canvas.addEventListener("pointerleave", release);
+  </script>
+</body>
+</html>
